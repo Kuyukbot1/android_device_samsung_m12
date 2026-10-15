@@ -25,9 +25,30 @@ on:
         required: false
         default: 'https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git'
       manifest_branch:
-        description: 'Branch manifest (twrp-13.0 = Android 13)'
+        # >>> CATATAN PENTING <<<
+        # TWRP TIDAK punya branch "twrp-13.0"!
+        # Yang ada hanya: twrp-11, twrp-12.1, twrp-14, twrp-14.1
+        # Kita pakai twrp-14.1 (paling baru & lengkap).
+        # TWRP adalah RECOVERY, bukan OS — versi manifest-nya
+        # tidak harus sama dengan Android 13 di HP.
+        description: 'Branch manifest TWRP'
         required: false
-        default: 'twrp-13.0'
+        default: 'twrp-14.1'
+      kernel_release_url:
+        # >>> URL asset kernel.gz dari GitHub Release <<<
+        # Kernel 35 MB tidak bisa diunggah lewat web GitHub
+        # (batas 25 MB). Jadi ditaruh di Release (batas 2 GB).
+        #
+        # Cara dapat URL:
+        #   1. Repo -> Releases -> Create a new release
+        #      tag: kernel-dwc4  judul: "Kernel stok DWC4"
+        #   2. Upload kernel.gz sebagai asset
+        #   3. Klik kanan asset -> Copy link address
+        #      URL-nya bentuknya:
+        #      https://github.com/<user>/<repo>/releases/download/kernel-dwc4/kernel.gz
+        description: 'URL kernel.gz dari Release (kosongkan kalau sudah ada di repo)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -74,7 +95,34 @@ jobs:
           ~/bin/repo --version
 
       # ============================================================
-      - name: '3. Clone TWRP manifest (shallow)'
+      - name: '3. Cek branch manifest ada atau tidak'
+        run: |
+          URL="${{ inputs.manifest_url }}"
+          BR="${{ inputs.manifest_branch }}"
+
+          echo "manifest : $URL"
+          echo "branch   : $BR"
+          echo ""
+
+          echo "=== branch yang TERSEDIA di manifest TWRP ==="
+          git ls-remote --heads "$URL" 2>/dev/null | \
+            awk '{print "   " $2}' | sed 's|refs/heads/||' || true
+          echo ""
+
+          # cek branch yang diminta
+          if git ls-remote --heads "$URL" "refs/heads/$BR" 2>/dev/null | grep -q .; then
+            echo "[OK] branch '$BR' ADA"
+          else
+            echo "[GAGAL] branch '$BR' TIDAK ADA di manifest ini"
+            echo ""
+            echo "TWRP TIDAK punya branch twrp-13.0."
+            echo "Yang ada: twrp-11, twrp-12.1, twrp-14, twrp-14.1"
+            echo "Gunakan twrp-14.1."
+            exit 1
+          fi
+
+      # ============================================================
+      - name: '4. Clone TWRP manifest (shallow)'
         run: |
           mkdir -p ~/twrp
           cd ~/twrp
@@ -83,9 +131,11 @@ jobs:
             -u "${{ inputs.manifest_url }}" \
             -b "${{ inputs.manifest_branch }}"
           echo "=== manifest OK ==="
+          echo "--- isi .repo/manifests/default.xml (awal) ---"
+          head -20 .repo/manifests/default.xml 2>/dev/null || true
 
       # ============================================================
-      - name: '4. Ambil device tree + isi prebuilt kernel STOK'
+      - name: '5. Ambil device tree + buang kernel DXJ3 bawaan'
         run: |
           cd ~/twrp
           mkdir -p device/samsung/m12/prebuilt
@@ -110,25 +160,118 @@ jobs:
           echo "kernel DXJ3 bawaan dihapus (beda firmware dgn HP)"
 
       # ============================================================
-      - name: '5. Pasang prebuilt kernel STOK DWC4'
+      - name: '6. Pasang prebuilt kernel STOK DWC4 + terapkan perbaikan'
         run: |
           cd ~/twrp
-          mkdir -p device/samsung/m12/prebuilt
-          cp $GITHUB_WORKSPACE/prebuilt/kernel   device/samsung/m12/prebuilt/kernel
-          cp $GITHUB_WORKSPACE/prebuilt/dtb.img  device/samsung/m12/prebuilt/dtb.img
+          D=device/samsung/m12
 
+          # ---- kernel ----
+          # >>> CARA AMBIL KERNEL <<<
+          # Kernel mentah = 35 MB, kernel.gz = 16 MB.
+          # Keduanya GAGAL di web upload GitHub ("Something went
+          # really wrong") padahal batas resminya 25 MB.
+          #
+          # SOLUSI: kernel.gz ditaruh di GitHub RELEASE
+          # (batas Release = 2 GB, tidak akan gagal).
+          #
+          # Urutan percobaan:
+          #   1. download dari Release   <- CARA UTAMA
+          #   2. prebuilt/kernel.gz di repo (kalau suatu saat ada)
+          #   3. prebuilt/kernel mentah di repo
+          mkdir -p $D/prebuilt
+          echo "=== SIAPKAN KERNEL ==="
+          echo "--- isi workspace/prebuilt ---"
+          ls -la $GITHUB_WORKSPACE/prebuilt/ || true
+          echo ""
+
+          GOT=0
+
+          # --- cara 1: GitHub Release ---
+          REL_URL="${{ inputs.kernel_release_url }}"
+          if [ -n "$REL_URL" ]; then
+            echo ">>> cara 1: unduh kernel dari Release"
+            echo "    URL: $REL_URL"
+            if curl -sSL --fail --retry 3 -o /tmp/kernel.gz "$REL_URL"; then
+              KSZ=$(stat -c%s /tmp/kernel.gz)
+              echo "    terunduh: $KSZ B"
+              if [ "$KSZ" -gt 1000000 ]; then
+                gunzip -c /tmp/kernel.gz > $D/prebuilt/kernel
+                echo "    dibuka: $(stat -c%s $D/prebuilt/kernel) B"
+                GOT=1
+              else
+                echo "    !!! file terlalu kecil, kemungkinan bukan kernel"
+                head -c 200 /tmp/kernel.gz
+                echo ""
+              fi
+            else
+              echo "    !!! gagal unduh dari Release"
+              echo "    cek: apakah Release sudah dibuat & asset-nya ada?"
+              echo "    URL yang dipakai: $REL_URL"
+            fi
+          else
+            echo ">>> cara 1 dilewati (input kernel_release_url kosong)"
+          fi
+
+          # --- cara 2: kernel.gz di repo ---
+          if [ "$GOT" = "0" ] && [ -f "$GITHUB_WORKSPACE/prebuilt/kernel.gz" ]; then
+            echo ">>> cara 2: kernel.gz ada di repo"
+            gunzip -c "$GITHUB_WORKSPACE/prebuilt/kernel.gz" > $D/prebuilt/kernel
+            echo "    dibuka: $(stat -c%s $D/prebuilt/kernel) B"
+            GOT=1
+          fi
+
+          # --- cara 3: kernel mentah di repo ---
+          if [ "$GOT" = "0" ] && [ -f "$GITHUB_WORKSPACE/prebuilt/kernel" ]; then
+            echo ">>> cara 3: kernel mentah ada di repo"
+            cp "$GITHUB_WORKSPACE/prebuilt/kernel" $D/prebuilt/kernel
+            GOT=1
+          fi
+
+          if [ "$GOT" = "0" ]; then
+            echo ""
+            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            echo "  KERNEL TIDAK DITEMUKAN"
+            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            echo ""
+            echo "  Perlu salah satu dari:"
+            echo "   a) isi input 'kernel_release_url' dengan URL asset"
+            echo "      Release yang berisi kernel.gz"
+            echo "   b) unggah prebuilt/kernel.gz ke repo"
+            echo "   c) unggah prebuilt/kernel ke repo"
+            echo ""
+            exit 1
+          fi
+
+          # --- dtb: selalu ambil dari repo (kecil, 128 KB) ---
+          if [ ! -f "$GITHUB_WORKSPACE/prebuilt/dtb.img" ]; then
+            echo "!!! TIDAK ADA dtb.img di workspace/prebuilt/"
+            exit 1
+          fi
+          cp "$GITHUB_WORKSPACE/prebuilt/dtb.img" $D/prebuilt/dtb.img
+
+          echo ""
           echo "=== prebuilt kernel yang dipakai ==="
-          ls -la device/samsung/m12/prebuilt/
+          ls -la $D/prebuilt/
           echo ""
           echo "--- VERIFIKASI: kernel harus STOK (0 kernelsu/magisk) ---"
-          KERNEL=device/samsung/m12/prebuilt/kernel
+          KERNEL=$D/prebuilt/kernel
           SIZE=$(stat -c%s $KERNEL)
           echo "ukuran kernel : $SIZE B"
           if [ "$SIZE" != "37191692" ]; then
             echo "!!! UKURAN KERNEL SALAH, harusnya 37191692 B"
+            echo "    dapat: $SIZE"
             exit 1
           fi
           echo "ukuran OK (sama dgn kernel stok di HP)"
+
+          SHA=$(sha1sum $KERNEL | awk '{print $1}')
+          echo "sha1          : $SHA"
+          if [ "$SHA" != "e00f114d096b13fc512ab271181e8300672b9c23" ]; then
+            echo "!!! SHA1 TIDAK COCOK"
+            echo "    harusnya: e00f114d096b13fc512ab271181e8300672b9c23"
+            exit 1
+          fi
+          echo "sha1 OK"
 
           KSU=$(strings -n 4 $KERNEL | grep -ci kernelsu || true)
           MAG=$(strings -n 4 $KERNEL | grep -ci magisk   || true)
@@ -145,28 +288,26 @@ jobs:
           echo ""
           echo "=== KERNEL STOK BERSIH - AMAN ==="
 
-          DTB=device/samsung/m12/prebuilt/dtb.img
-          echo "ukuran dtb : $(stat -c%s $DTB) B (harusnya 128116)"
+          DTB=$D/prebuilt/dtb.img
+          DSZ=$(stat -c%s $DTB)
+          echo "ukuran dtb : $DSZ B (harusnya 128116)"
+          if [ "$DSZ" != "128116" ]; then
+            echo "!!! UKURAN DTB SALAH"
+            exit 1
+          fi
 
-      # ============================================================
-      - name: '6. Terapkan perbaikan device tree'
-        run: |
-          cd ~/twrp
-          D=device/samsung/m12
-
+          # ---- timpa file device tree yang diperbaiki ----
+          echo ""
           echo "=== TIMPA file yang sudah diperbaiki ==="
-          for f in BoardConfig.mk device.mk omni_m12.mk AndroidProducts.mk; do
+          for f in BoardConfig.mk device.mk omni_m12.mk; do
             if [ -f "$GITHUB_WORKSPACE/devicetree/$f" ]; then
               cp "$GITHUB_WORKSPACE/devicetree/$f" "$D/$f"
-              echo "  ditimpa: $f"
+              echo "  ditimpa: $f ($(wc -l < $D/$f) baris)"
             else
-              echo "  (tidak ada di workspace, pakai versi repo): $f"
+              echo "  !!! TIDAK ADA: workspace/devicetree/$f"
+              exit 1
             fi
           done
-
-          echo ""
-          echo "=== recovery.fstab (dari repo) ==="
-          head -5 $D/recovery.fstab || true
 
       # ============================================================
       - name: '7. Cek konfigurasi sebelum build'
