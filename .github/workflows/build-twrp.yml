@@ -1,0 +1,361 @@
+name: Build TWRP for SM-M127F (m12)
+
+# ==================================================================
+#  Build TWRP untuk Samsung Galaxy M12 (SM-M127F / m12 / exynos850)
+#
+#  STRATEGI:
+#    - TWRP ditaruh di partisi RECOVERY
+#    - Kernel PREBUILT = kernel STOK DWC4 dari HP sendiri
+#      (4.19.111-26004678 dpi@SWDK3905, 0 kernelsu/magisk)
+#      ==> inilah kernel yang HP TERIMA saat boot normal
+#    - Android di partisi boot TIDAK disentuh
+#
+#  CARA PAKAI:
+#    1. Fork repo android_device_samsung_m12
+#    2. Ganti isi device tree dengan file-file dari folder ini
+#    3. Copy workflow ini ke .github/workflows/build-twrp.yml
+#    4. Jalankan Actions -> download artifact
+# ==================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_url:
+        description: 'TWRP minimal manifest'
+        required: false
+        default: 'https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git'
+      manifest_branch:
+        description: 'Branch manifest (twrp-13.0 = Android 13)'
+        required: false
+        default: 'twrp-13.0'
+
+jobs:
+  build:
+    name: Build TWRP m12
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      # ============================================================
+      - name: '0. Info sistem'
+        run: |
+          echo "=== Info runner ==="
+          uname -a
+          nproc
+          free -h
+          df -h /
+
+      # ============================================================
+      - name: '1. Siapkan paket yang dibutuhkan'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison build-essential ccache curl flex g++-multilib \
+            gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev \
+            lib32readline-dev lib32z1-dev libelf-dev liblz4-tool \
+            libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 \
+            openjdk-11-jdk android-sdk-libsparse-utils
+          echo "OK paket terpasang"
+
+      # ============================================================
+      - name: '2. Git config + repo tool'
+        run: |
+          git config --global user.name  "Kuyukbot1"
+          git config --global user.email "kuyukbot1@users.noreply.github.com"
+          git config --global color.ui false
+
+          mkdir -p ~/bin
+          curl -sSL "https://storage.googleapis.com/git-repo-downloads/repo" \
+            -o ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          ~/bin/repo --version
+
+      # ============================================================
+      - name: '3. Clone TWRP manifest (shallow)'
+        run: |
+          mkdir -p ~/twrp
+          cd ~/twrp
+          repo init \
+            --depth=1 \
+            -u "${{ inputs.manifest_url }}" \
+            -b "${{ inputs.manifest_branch }}"
+          echo "=== manifest OK ==="
+
+      # ============================================================
+      - name: '4. Ambil device tree + isi prebuilt kernel STOK'
+        run: |
+          cd ~/twrp
+          mkdir -p device/samsung/m12/prebuilt
+
+          # ---- device tree dari repo user ----
+          git clone --depth=1 \
+            -b "m12nsxx-user-13-TP1A.220624.014-M127FXXS9DXJ3-release-keys" \
+            https://github.com/Kuyukbot1/android_device_samsung_m12.git \
+            /tmp/dt-src
+
+          # copy semua file (kecuali .git) ke device/samsung/m12
+          rsync -a --exclude='.git' /tmp/dt-src/ device/samsung/m12/
+
+          echo "=== isi device tree ==="
+          ls -la device/samsung/m12/
+          echo "--- prebuilt ---"
+          ls -la device/samsung/m12/prebuilt/
+
+          # ---- hapus kernel DXJ3 bawaan (beda firmware) ----
+          rm -f device/samsung/m12/prebuilt/kernel
+          rm -f device/samsung/m12/prebuilt/dtb.img
+          echo "kernel DXJ3 bawaan dihapus (beda firmware dgn HP)"
+
+      # ============================================================
+      - name: '5. Pasang prebuilt kernel STOK DWC4'
+        run: |
+          cd ~/twrp
+          mkdir -p device/samsung/m12/prebuilt
+          cp $GITHUB_WORKSPACE/prebuilt/kernel   device/samsung/m12/prebuilt/kernel
+          cp $GITHUB_WORKSPACE/prebuilt/dtb.img  device/samsung/m12/prebuilt/dtb.img
+
+          echo "=== prebuilt kernel yang dipakai ==="
+          ls -la device/samsung/m12/prebuilt/
+          echo ""
+          echo "--- VERIFIKASI: kernel harus STOK (0 kernelsu/magisk) ---"
+          KERNEL=device/samsung/m12/prebuilt/kernel
+          SIZE=$(stat -c%s $KERNEL)
+          echo "ukuran kernel : $SIZE B"
+          if [ "$SIZE" != "37191692" ]; then
+            echo "!!! UKURAN KERNEL SALAH, harusnya 37191692 B"
+            exit 1
+          fi
+          echo "ukuran OK (sama dgn kernel stok di HP)"
+
+          KSU=$(strings -n 4 $KERNEL | grep -ci kernelsu || true)
+          MAG=$(strings -n 4 $KERNEL | grep -ci magisk   || true)
+          echo "jumlah 'kernelsu' : $KSU"
+          echo "jumlah 'magisk'   : $MAG"
+          if [ "$KSU" != "0" ] || [ "$MAG" != "0" ]; then
+            echo "!!! KERNEL TIDAK BERSIH - STOP"
+            exit 1
+          fi
+
+          echo ""
+          echo "--- versi kernel ---"
+          strings -n 4 $KERNEL | grep -m1 "^Linux version"
+          echo ""
+          echo "=== KERNEL STOK BERSIH - AMAN ==="
+
+          DTB=device/samsung/m12/prebuilt/dtb.img
+          echo "ukuran dtb : $(stat -c%s $DTB) B (harusnya 128116)"
+
+      # ============================================================
+      - name: '6. Terapkan perbaikan device tree'
+        run: |
+          cd ~/twrp
+          D=device/samsung/m12
+
+          echo "=== TIMPA file yang sudah diperbaiki ==="
+          for f in BoardConfig.mk device.mk omni_m12.mk AndroidProducts.mk; do
+            if [ -f "$GITHUB_WORKSPACE/devicetree/$f" ]; then
+              cp "$GITHUB_WORKSPACE/devicetree/$f" "$D/$f"
+              echo "  ditimpa: $f"
+            else
+              echo "  (tidak ada di workspace, pakai versi repo): $f"
+            fi
+          done
+
+          echo ""
+          echo "=== recovery.fstab (dari repo) ==="
+          head -5 $D/recovery.fstab || true
+
+      # ============================================================
+      - name: '7. Cek konfigurasi sebelum build'
+        run: |
+          cd ~/twrp
+          D=device/samsung/m12
+
+          echo "=============================================="
+          echo "  CEK KRITIS"
+          echo "=============================================="
+
+          fail=0
+
+          # kernel prebuilt ada?
+          if [ ! -s "$D/prebuilt/kernel" ]; then
+            echo "[GAGAL] prebuilt/kernel tidak ada"; fail=1
+          else
+            echo "[OK] prebuilt/kernel ada ($(stat -c%s $D/prebuilt/kernel) B)"
+          fi
+
+          # dtb ada?
+          if [ ! -s "$D/prebuilt/dtb.img" ]; then
+            echo "[GAGAL] prebuilt/dtb.img tidak ada"; fail=1
+          else
+            echo "[OK] prebuilt/dtb.img ada ($(stat -c%s $D/prebuilt/dtb.img) B)"
+          fi
+
+          # device.mk TIDAK BOLEH cuma 1 baris
+          LINES=$(wc -l < $D/device.mk)
+          if [ "$LINES" -lt 5 ]; then
+            echo "[GAGAL] device.mk cuma $LINES baris (harus diisi!)"; fail=1
+          else
+            echo "[OK] device.mk terisi ($LINES baris)"
+          fi
+
+          # platform harus exynos850
+          if grep -q "TARGET_BOARD_PLATFORM := exynos850" $D/BoardConfig.mk; then
+            echo "[OK] TARGET_BOARD_PLATFORM = exynos850"
+          else
+            echo "[GAGAL] TARGET_BOARD_PLATFORM salah"; fail=1
+          fi
+
+          # fingerprint harus DWC4
+          if grep -q "DWC4" $D/omni_m12.mk; then
+            echo "[OK] fingerprint = DWC4 (sesuai HP)"
+          else
+            echo "[PERINGATAN] fingerprint bukan DWC4"
+          fi
+
+          # partisi recovery harus 46137344
+          if grep -q "BOARD_RECOVERYIMAGE_PARTITION_SIZE := 46137344" $D/BoardConfig.mk; then
+            echo "[OK] ukuran partisi recovery = 46137344 B"
+          else
+            echo "[PERINGATAN] ukuran partisi recovery beda"
+          fi
+
+          # harus ada config TWRP
+          if grep -q "TW_THEME" $D/BoardConfig.mk; then
+            echo "[OK] konfigurasi TWRP ada"
+          else
+            echo "[GAGAL] konfigurasi TWRP tidak ada"; fail=1
+          fi
+
+          echo "=============================================="
+          if [ "$fail" != "0" ]; then
+            echo "ADA YANG GAGAL - batalkan"
+            exit 1
+          fi
+          echo "SEMUA CEK LULUS"
+          echo "=============================================="
+
+      # ============================================================
+      - name: '8. Sinkronkan source (repo sync)'
+        run: |
+          cd ~/twrp
+          echo "Mulai repo sync (bisa 1-2 jam)..."
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          echo "=== repo sync selesai ==="
+          du -sh ~/twrp
+
+      # ============================================================
+      - name: '9. Bersihkan & build'
+        run: |
+          cd ~/twrp
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export LC_ALL=C
+          source build/envsetup.sh
+
+          echo "=== lunch ==="
+          lunch omni_m12-eng || lunch omni_m12-userdebug
+
+          echo ""
+          echo "=== mulai build recovery image ==="
+          mka recoveryimage -j$(nproc --all) 2>&1 | tail -120
+
+          echo ""
+          echo "=== hasil ==="
+          find out/target/product/m12 -maxdepth 1 -name "*.img" -exec ls -la {} \;
+
+      # ============================================================
+      - name: '10. Verifikasi hasil build'
+        run: |
+          cd ~/twrp
+          OUT=out/target/product/m12
+
+          echo "=============================================="
+          echo "  VERIFIKASI HASIL"
+          echo "=============================================="
+
+          FOUND=0
+          for f in recovery.img recovery.tar boot.img; do
+            if [ -f "$OUT/$f" ]; then
+              echo "[ADA] $f  ($(stat -c%s $OUT/$f) B)"
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" = "0" ]; then
+            echo "!!! TIDAK ADA IMAGE HASIL BUILD"
+            ls -la $OUT/ || true
+            exit 1
+          fi
+
+          if [ -f "$OUT/recovery.img" ]; then
+            echo ""
+            echo "--- cek magic recovery.img ---"
+            xxd -l 16 $OUT/recovery.img
+            echo ""
+            echo "--- cek ukuran vs partisi (46137344 B) ---"
+            RSZ=$(stat -c%s $OUT/recovery.img)
+            echo "ukuran recovery.img : $RSZ B"
+            if [ "$RSZ" -gt 46137344 ]; then
+              echo "[PERINGATAN] lebih besar dari partisi recovery HP!"
+            else
+              echo "[OK] muat di partisi recovery"
+            fi
+          fi
+
+      # ============================================================
+      - name: '11. Bungkus jadi tar untuk Odin'
+        if: success()
+        run: |
+          cd ~/twrp
+          OUT=out/target/product/m12
+          mkdir -p /tmp/odin
+
+          if [ -f "$OUT/recovery.img" ]; then
+            cp $OUT/recovery.img /tmp/odin/recovery.img
+
+            # tar USTAR murni (Odin tidak suka PAX header!)
+            cd /tmp/odin
+            tar --format=ustar -cf AP_TWRP-m12.tar recovery.img
+
+            echo "=== tar dibuat ==="
+            ls -la /tmp/odin/
+            echo ""
+            echo "--- cek format tar (harus typeflag 0, tanpa PaxHeader) ---"
+            dd if=/tmp/odin/AP_TWRP-m12.tar bs=1 skip=156 count=1 2>/dev/null | xxd
+            echo ""
+            head -c 2048 /tmp/odin/AP_TWRP-m12.tar | strings | head -3
+          fi
+
+      # ============================================================
+      - name: '12. Upload artifact'
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWRP-m12
+          path: |
+            /home/runner/twrp/out/target/product/m12/*.img
+            /home/runner/twrp/out/target/product/m12/*.tar
+            /tmp/odin/*.tar
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ============================================================
+      - name: '13. Ringkasan'
+        if: always()
+        run: |
+          echo "=============================================="
+          echo "  SELESAI"
+          echo "=============================================="
+          echo "Kalau build sukses:"
+          echo "  1. Download artifact TWRP-m12"
+          echo "  2. Ambil AP_TWRP-m12.tar"
+          echo "  3. Flash via Odin: AP saja, BL/CP/CSC KOSONG"
+          echo "  4. Re-Partition WAJIB OFF"
+          echo ""
+          echo "Masuk TWRP:"
+          echo "  adb reboot recovery       (dari Android)"
+          echo "  atau Volume Up + colok USB"
+          echo "=============================================="
