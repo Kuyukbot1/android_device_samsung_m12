@@ -4,6 +4,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
+# ==============================================================
+#  omni_m12.mk — DIUBAH ke firmware DWC4 (sesuai HP Master)
+#  Repo asli: M127FXXS9DXJ3  (DXJ3, firmware lebih baru)
+#  HP Master: M127FXXU4DWC4  (DWC4, Android 13)
+# ==============================================================
 
 # Inherit from those products. Most specific first.
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
@@ -23,7 +28,8 @@ PRODUCT_MANUFACTURER := samsung
 
 PRODUCT_GMS_CLIENTID_BASE := android-samsung-ss
 
+# >>> DIPERBAIKI: DXJ3 -> DWC4 (firmware HP Master)
 PRODUCT_BUILD_PROP_OVERRIDES += \
-    PRIVATE_BUILD_DESC="m12nsxx-user 13 TP1A.220624.014 M127FXXS9DXJ3 release-keys"
+    PRIVATE_BUILD_DESC="m12nsxx-user 13 TP1A.220624.014 M127FXXU4DWC4 release-keys"
 
-BUILD_FINGERPRINT := samsung/m12nsxx/m12:13/TP1A.220624.014/M127FXXS9DXJ3:user/release-keys
+BUILD_FINGERPRINT := samsung/m12nsxx/m12:13/TP1A.220624.014/M127FXXU4DWC4:user/release-keys
